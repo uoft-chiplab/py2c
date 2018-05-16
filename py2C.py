@@ -1450,6 +1450,87 @@ class DAC8574(I2c_device):
 
 
 
+class MCP9808(I2c_device):
+    """Interface to the MCP9808 temperature sensor.
+       BAO 2018/05/11"""
+
+    BIT_DEPTH = 16
+    _dev_type = 'MCP9808'
+    _dev_class = DEV_MEAS
+    _valid_addr = [0x18]
+    _default = {\
+        'bus':smbus.SMBus(1), \
+        'addr':0x18, \
+        'group':None,\
+        'cycle':None,\
+        'data_index':0,\
+        }
+    
+    def __init__(self,**kwargs):
+        """ Initialize instance """
+        I2c_device.__init__(self,**kwargs)
+        
+        # Verify the manufacturer and device ids to ensure we are talking to
+        # what we expect.
+        #manufacturer ID in register 0110
+        self.buf = self.read(ctrl=0x06,nbytes=2)
+        ok = self.buf[1] == 0x54 and self.buf[0] == 0
+        
+        #device ID in register 0111
+        self.buf = self.read(ctrl=0x07,nbytes=2)
+
+        if not ok or self.buf[0] != 0x04:
+            raise ValueError("Unable to find MCP9808 at i2c address " + str(hex(self._valid_addr[0])))
+
+    # architecture without registers
+    def config(self,*args,**kwargs): raise NotImplementedError
+    def get_config(self,*args,**kwargs): raise NotImplementedError
+    def config_info(self,*args,**kwargs): raise NotImplementedError
+
+    def get_data(self):
+        """ Read humidity and temperature data from the chip. Returns a tuple
+        (humidity,temperature,status). Will read stale data if no new
+        measurements are requested.
+        Warning: does not set the focus to this sensor if part of a group! """
+        self.buf = self.read(ctrl=0x05,nbytes=3)
+        
+        # clear flag bits
+        self.buf[0] = self.buf[0] & 0x1f
+        # check if T < 0 C
+        if self.buf[0] & 0x10 == 0x10:
+            # if so, clear the sign, then calculate
+            self.buf[0] = self.buf[0] & 0x0f
+            return (self.buf[0] * 16 + self.buf[1] / 16.0) - 256
+        # if T > 0 C, calculate
+        return self.buf[0] * 16 + self.buf[1] / 16.0
+    
+    def set_focus(self):
+        """ Sets the focus on this  sensor, if it is part of a group. This is 
+        done by choosing the switch settings that exclusively targets this 
+        HIH sensor, muting all others in the group. """
+        if self.group == None:
+            # do nothing, if not part of a group
+            pass
+        else:
+            # build switch settings
+            sw = self.group['switch'].get_settings()
+            for ch in self.group['channels']:
+                sw[ch] = 0
+            sw[self.group['me']] = 1
+            # set switch to disable all channels in group except for 'mine'
+            self.group['switch'].set_channels(sw)
+            
+    def get(self):
+        """ Short-hand for getting a single measurement from the device. """
+        # set focus to 'me' if part of a group
+        self.set_focus()
+        # request new measurement and retrieve values
+        #self.request_measurement()
+        data = self.get_data()
+        # return value
+        return data
+    
+
 
 
 

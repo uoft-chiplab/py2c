@@ -174,9 +174,9 @@ if __name__ == "__main__":
     # initially enable channels with devices
     #tca.set_channels([1,1,1,1,1,1,1,1])
     
-    #MCP9808 = i2c.MCP9808(addr=0x1c)
+    MCP9808 = i2c.MCP9808(addr=0x1c)
     
-    LSM9DS0 = i2c.LSM9DS0_XM()
+    #LSM9DS0 = i2c.LSM9DS0_XM()
 
     # HIH8121: array of temp/humidity measurements
     #hih_channels = [0,1,2,3,4,5,6,7]
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     # create a datalogger object for the devices
     log = DataLogger(filemask="DataLog_{2:04}-{1:02}-{0:02}.txt",\
                      path="/home/pi/Documents/Data Log/",\
-                     devices=[LSM9DS0],\
+                     devices=[MCP9808],\
                      avg_period=5.0)
     # start the measurement loop
     try:
