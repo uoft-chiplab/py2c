@@ -1450,8 +1450,379 @@ class DAC8574(I2c_device):
 
 
 
+class MCP9808(I2c_device):
+    """Interface to the MCP9808 temperature sensor.
+       BAO 2018/05/11"""
+
+    BIT_DEPTH = 16
+    _dev_type = 'MCP9808'
+    _dev_class = DEV_MEAS
+    _valid_addr = [0x18]
+    _default = {\
+        'bus':smbus.SMBus(1), \
+        'addr':0x18, \
+        'group':None,\
+        'cycle':None,\
+        'data_index':0,\
+        }
+    
+    def __init__(self,**kwargs):
+        """ Initialize instance """
+        I2c_device.__init__(self,**kwargs)
+        
+        # Verify the manufacturer and device ids to ensure we are talking to
+        # what we expect.
+        #manufacturer ID in register 0110
+        self.buf = self.read(ctrl=0x06,nbytes=2)
+        ok = self.buf[1] == 0x54 and self.buf[0] == 0
+        
+        #device ID in register 0111
+        self.buf = self.read(ctrl=0x07,nbytes=2)
+
+        if not ok or self.buf[0] != 0x04:
+            raise ValueError("Unable to find MCP9808 at i2c address " + str(hex(self._valid_addr[0])))
+
+    # architecture without registers
+    def config(self,*args,**kwargs): raise NotImplementedError
+    def get_config(self,*args,**kwargs): raise NotImplementedError
+    def config_info(self,*args,**kwargs): raise NotImplementedError
+
+    def get_data(self):
+        """ Read humidity and temperature data from the chip. Returns a tuple
+        (humidity,temperature,status). Will read stale data if no new
+        measurements are requested.
+        Warning: does not set the focus to this sensor if part of a group! """
+        self.buf = self.read(ctrl=0x05,nbytes=3)
+        
+        # clear flag bits
+        self.buf[0] = self.buf[0] & 0x1f
+        # check if T < 0 C
+        if self.buf[0] & 0x10 == 0x10:
+            # if so, clear the sign, then calculate
+            self.buf[0] = self.buf[0] & 0x0f
+            return (self.buf[0] * 16 + self.buf[1] / 16.0) - 256
+        # if T > 0 C, calculate
+        return self.buf[0] * 16 + self.buf[1] / 16.0
+    
+    def set_focus(self):
+        """ Sets the focus on this  sensor, if it is part of a group. This is 
+        done by choosing the switch settings that exclusively targets this 
+        HIH sensor, muting all others in the group. """
+        if self.group == None:
+            # do nothing, if not part of a group
+            pass
+        else:
+            # build switch settings
+            sw = self.group['switch'].get_settings()
+            for ch in self.group['channels']:
+                sw[ch] = 0
+            sw[self.group['me']] = 1
+            # set switch to disable all channels in group except for 'mine'
+            self.group['switch'].set_channels(sw)
+            
+    def get(self):
+        """ Short-hand for getting a single measurement from the device. """
+        # set focus to 'me' if part of a group
+        self.set_focus()
+        # request new measurement and retrieve values
+        #self.request_measurement()
+        data = self.get_data()
+        # return value
+        return data
+    
 
 
+
+
+
+class LSM9DS0_XM(I2c_device):
+    """Driver for the LSM9DS0 accelerometer, magnetometer, gyroscope."""
+    # Class-level buffer for reading and writing data with the sensor.
+    # This reduces memory allocations but means the code is not re-entrant or
+    # thread safe!
+    _BUFFER = bytearray(6)
+    
+    
+    BIT_DEPTH = 16
+    _dev_type = 'LSM9DS0_XM'
+    _dev_class = DEV_MEAS
+    _valid_addr = [0x1d]
+    _default = {\
+        'bus':smbus.SMBus(1), \
+        'addr':0x1d, \
+        'group':None,\
+        'cycle':None,\
+        'data_index':0,\
+        }
+    
+    def __init__(self,**kwargs):
+        """ Initialize instance """
+        I2c_device.__init__(self,**kwargs)
+       
+        # Check ID registers.
+        if self._read_u8(0x0f) != 0b01001001:
+            raise RuntimeError('Could not find LSM9DS0, check wiring!')
+        # Enable the accelerometer (3 lsb), continous at 100 Hz (4 msb)
+        self._write_u8(0x20, 0b01100111)
+        # enable temp. sensor,(1) high mag. resolution (2), at 100 Hz (3)
+        self._write_u8(0x24, 0b11110100)
+        # set mag scale to +/-2 G 
+        self._write_u8(0x25, 0b00000000)
+        # enable mag continuous
+        self._write_u8(0x26, 0b00000000)
+        # Set default ranges for the various sensors
+        self._accel_mg_lsb = None
+        self._mag_mgauss_lsb = None
+        self.accel_range = 0x00
+        self.mag_gain = 0x00
+ 
+    @property
+    def accel_range(self):
+        """Get and set the accelerometer range.  Must be a value of:
+          - ACCELRANGE_2G
+          - ACCELRANGE_4G
+          - ACCELRANGE_6G
+          - ACCELRANGE_8G
+          - ACCELRANGE_16G
+        """
+        reg = self._read_u8(0x21)
+        # return masked register (forced to 8-bit redundantly?)
+        return (reg & 0b00111000) & 0xFF
+ 
+    @accel_range.setter
+    def accel_range(self, val):
+        assert val in ((0b000 << 3),(0b001 << 3),(0b010 << 3),(0b011 << 3),(0b100 << 3))
+        reg = self._read_u8(0x21)
+        # grab all other bits
+        reg = (reg & ~(0b00111000)) & 0xFF
+        # replace relevant bits with updated vals
+        reg |= val
+        self._write_u8(0x21, reg)
+        if val == (0b000 << 3):
+            self._accel_mg_lsb = 0.061
+        elif val == (0b001 << 3):
+            self._accel_mg_lsb = 0.122
+        elif val == (0b010 << 3):
+            self._accel_mg_lsb = 0.183
+        elif val == (0b011 << 3):
+            self._accel_mg_lsb = 0.244
+        elif val == (0b100 << 3):
+            self._accel_mg_lsb = 0.732
+            
+ 
+    @property
+    def mag_gain(self):
+        """Get and set the magnetometer gain.  Must be a value of:
+          - MAGGAIN_2GAUSS
+          - MAGGAIN_4GAUSS
+          - MAGGAIN_8GAUSS
+          - MAGGAIN_12GAUSS
+        """
+        reg = self._read_u8(0x25)
+        return (reg & 0b01100000) & 0xFF
+ 
+    @mag_gain.setter
+    def mag_gain(self, val):
+        assert val in ((0b00 << 5),(0b01 << 5),(0b10 << 5),(0b11 << 5))
+        reg = self._read_u8(0x25)
+        reg = (reg & ~(0b01100000)) & 0xFF
+        reg |= val
+        self._write_u8(0x25, reg)
+        if val == (0b00 << 5):
+            self._mag_mgauss_lsb = 0.08
+        elif val == (0b01 << 5):
+            self._mag_mgauss_lsb = 0.16
+        elif val == (0b10 << 5):
+            self._mag_mgauss_lsb = 0.32
+        elif val == (0b11 << 5):
+            self._mag_mgauss_lsb = 0.48
+ 
+    def read_accel_raw(self):
+        """Read the raw accelerometer sensor values and return it as a
+        3-tuple of X, Y, Z axis values that are 16-bit unsigned values.  If you
+        want the acceleration in nice units you probably want to use the
+        accelerometer property!
+        """
+        # Read the accelerometer (we OR with 0x80 to indicate we want to read multiple bytes)
+        vals = self.read(0x80 | 0x28, nbytes=6)
+        print(vals)
+        return [vals[0] << 8 | vals[1], vals[2] << 8 | vals[3], vals[4] << 8 | vals[5]]
+ 
+    @property
+    def accelerometer(self):
+        """Get the accelerometer X, Y, Z axis values as a 3-tuple of
+        m/s^2 values.
+        """
+        raw = self.read_accel_raw()
+        print(raw)
+        print([x * self._accel_mg_lsb / 1000.0 * 9.80665 for x in raw])
+        return [x * self._accel_mg_lsb / 1000.0 * 9.80665 for x in raw]
+ 
+    def read_mag_raw(self):
+        """Read the raw magnetometer sensor values and return it as a
+        3-tuple of X, Y, Z axis values that are 16-bit unsigned values.  If you
+        want the magnetometer in nice units you probably want to use the
+        magnetometer property!
+        """
+        # Read the magnetometer
+        self._read_bytes(0x80 | 0x08, 6, self._BUFFER)
+        raw_x, raw_y, raw_z = struct.unpack_from('<hhh', self._BUFFER[0:6])
+        return (raw_x, raw_y, raw_z)
+ 
+    @property
+    def magnetometer(self):
+        """Get the magnetometer X, Y, Z axis values as a 3-tuple of
+        gauss values.
+        """
+        raw = self.read_mag_raw()
+        return map(lambda x: x * self._mag_mgauss_lsb / 1000.0, raw)
+ 
+    def read_temp_raw(self):
+        """Read the raw temperature sensor value and return it as a 16-bit
+        unsigned value.  If you want the temperature in nice units you probably
+        want to use the temperature property!
+        """
+        # Read temp sensor
+        val = self.read(0x80 | 0x05, nbytes=2)
+        #print(val)
+        #print((val[1] << 8))
+        #print(val[0])
+        #print(((val[1] << 8) | val[0]))
+        temp = ((val[1] << 8) | val[0])
+        #print(temp)
+        #print(twoscompl2int(temp,n=12))
+        #print(_twos_comp(temp, 12))
+        return twoscompl2int(temp,n=12)
+ 
+    @property
+    def temperature(self):
+        """Get the temperature of the sensor in degrees Celsius."""
+        # This is just a guess since the starting point (21C here) isn't documented :(
+        temp = self.read_temp_raw()
+        temp = 21.0 + temp/8
+        return temp
+ 
+    def _read_u8(self, address):
+        #self._BUFFER[0] = address & 0xFF
+        #self.write(self._BUFFER, end=1, stop=False)
+        self._BUFFER = self.read(ctrl=address, nbytes=1)
+        return self._BUFFER[0]
+ 
+    def _read_bytes(self, address, count, buf):
+        #buf[0] = address & 0xFF
+        #self.write(buf, end=1, stop=False)
+        #self.readinto(buf, end=count)
+        self._BUFFER = self.read(ctrl=address,nbytes=count)
+        buf = self._BUFFER
+ 
+    def _write_u8(self, address, val):
+        #self._BUFFER[0] = address & 0xFF
+        #self._BUFFER[1] = val & 0xFF
+        #self.write(self._BUFFER, end=2)
+        self.write(ctrl=address,data=val)
+        
+    def get(self):
+        return self.temperature
+            
+"""--------------------------------------------------------"""
+class LSM9DS0_G(I2c_device):
+    """Driver for the LSM9DS0 gyroscope."""
+    # Class-level buffer for reading and writing data with the sensor.
+    # This reduces memory allocations but means the code is not re-entrant or
+    # thread safe!
+    _BUFFER = bytearray(6)
+    
+    # User facing constants/module globals.
+    GYROSCALE_245DPS             = (0b00 << 4)  # +/- 245 degrees per second rotation
+    GYROSCALE_500DPS             = (0b01 << 4)  # +/- 500 degrees per second rotation
+    GYROSCALE_2000DPS            = (0b10 << 4)  # +/- 2000 degrees per second rotation
+    
+    BIT_DEPTH = 16
+    _dev_type = 'LSM9DS0'
+    _dev_class = DEV_MEAS
+    _valid_addr = [0x6b]
+    _default = {\
+        'bus':smbus.SMBus(1), \
+        'addr':0x6b, \
+        'group':None,\
+        'cycle':None,\
+        'data_index':0,\
+        }
+    
+    def __init__(self,**kwargs):
+        """ Initialize instance """
+        I2c_device.__init__(self,**kwargs)
+       
+        # Check ID registers.
+        if self._read_u8(0x0f) != 0b11010100:
+            raise RuntimeError('Could not find LSM9DS0, check wiring!')
+        # set data rate to 380 Hz (2), bandwidth to 100 Hz(2), enable gyro (4)
+        self._write_u8(0x20, 0b10111111)
+        self._gyro_dps_digit = None
+        self.gyro_scale = GYROSCALE_245DPS
+ 
+    @property
+    def gyro_scale(self):
+        """Get and set the gyroscope scale.  Must be a value of:
+          - GYROSCALE_245DPS
+          - GYROSCALE_500DPS
+          - GYROSCALE_2000DPS
+        """
+        reg = self._read_u8(0x23)
+        return (reg & 0b00110000) & 0xFF
+ 
+    @gyro_scale.setter
+    def gyro_scale(self, val):
+        assert val in (GYROSCALE_245DPS, GYROSCALE_500DPS, GYROSCALE_2000DPS)
+        reg = self._read_u8(0x23)
+        reg = (reg & ~(0b00110000)) & 0xFF
+        reg |= val
+        self._write_u8(0x23, reg)
+        if val == GYROSCALE_245DPS:
+            self._gyro_dps_digit = 0.00875
+        elif val == GYROSCALE_500DPS:
+            self._gyro_dps_digit = 0.01750
+        elif val == GYROSCALE_2000DPS:
+            self._gyro_dps_digit = 0.07000
+            
+    def read_gyro_raw(self):
+        """Read the raw gyroscope sensor values and return it as a
+        3-tuple of X, Y, Z axis values that are 16-bit unsigned values.  If you
+        want the gyroscope in nice units you probably want to use the
+        gyroscope property!
+        """
+        # Read the gyroscope
+        self._read_bytes(0x80 | 0x28, 6, self._BUFFER)
+        raw_x, raw_y, raw_z = struct.unpack_from('<hhh', self._BUFFER[0:6])
+        return (raw_x, raw_y, raw_z)
+ 
+    @property
+    def gyroscope(self):
+        """Get the gyroscope X, Y, Z axis values as a 3-tuple of
+        degrees/second values.
+        """
+        raw = self.read_mag_raw()
+        return map(lambda x: x * self._gyro_dps_digit, raw)
+ 
+ 
+    def _read_u8(self, address):
+        #self._BUFFER[0] = address & 0xFF
+        #self.write(self._BUFFER, end=1, stop=False)
+        self._BUFFER = self.read(ctrl=address, nbytes=1)
+        return self._BUFFER[0]
+ 
+    def _read_bytes(self, address, count, buf):
+        #buf[0] = address & 0xFF
+        #self.write(buf, end=1, stop=False)
+        #self.readinto(buf, end=count)
+        self._BUFFER = self.read(ctrl=address,nbytes=count)
+        buf = self._BUFFER
+ 
+    def _write_u8(self, address, val):
+        #self._BUFFER[0] = address & 0xFF
+        #self._BUFFER[1] = val & 0xFF
+        #self.write(self._BUFFER, end=2)
+        self.write(ctrl=address,data=val)
 
 
 
